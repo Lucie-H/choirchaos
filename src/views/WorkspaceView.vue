@@ -8,12 +8,13 @@ import BabySvenja from "@/components/BabySvenja.vue";
 import KbdShortcut from "@/components/KbdShortcut.vue";
 import MarkerPanel from "@/components/MarkerPanel.vue";
 import MixerPanel from "@/components/MixerPanel.vue";
-import SongDetailsDialog from "@/components/SongDetailsDialog.vue";
+import SongEditorPanel from "@/components/SongEditorPanel.vue";
 import SongPdfViewer from "@/components/SongPdfViewer.vue";
 import TransportBar from "@/components/TransportBar.vue";
 import VampCard from "@/components/VampCard.vue";
 import WarpPanel from "@/components/WarpPanel.vue";
 import { type ShortcutAction, useGlobalShortcuts } from "@/composables/useGlobalShortcuts";
+import { provideMeasureEditor, useMeasureEditor } from "@/composables/useMeasureEditor";
 import Show from "@/core/models/show";
 import type Song from "@/core/models/song";
 import { getAccessFlags } from "@/pocketbase/auth";
@@ -39,14 +40,35 @@ const showLoading = ref(true);
 
 const song = ref<Song | undefined>();
 const songLoading = ref(true);
-const editMode = ref(route.query.edit === "1");
+const editMode = computed(() => route.name === "song-edit");
 const canEdit = computed(() => !!show.value && getAccessFlags(show.value.permissions, auth.user?.id).editor);
 const showWarpPanel = computed(() => editMode.value && song.value?.playerMode === "audio");
-const songDetailsVisible = ref(false);
-const songDetailsTarget = ref<Song>();
+const hasMarkers = computed(() => (song.value?.events.markers.items().length ?? 0) > 0);
+const hasStartPanel = computed(() => editMode.value || hasMarkers.value);
+const isStartPanelOpen = computed(() => hasStartPanel.value && settings.current.workspace.panelVisible.markers);
+
+provideMeasureEditor(useMeasureEditor(song, editMode));
+
+// Rehearsers have nothing to do with an empty markers panel. Below lg the song editor's panel is a bottom sheet over the score.
+const tabs = computed(() => [
+  ...(editMode.value || !hasMarkers.value ? [] : [{ value: "markers", label: "Markers" } as const]),
+  { value: "pdf", label: "PDF" } as const,
+  { value: "mixer", label: "Mixer" } as const,
+]);
+const selectedTab = computed(() => tabs.value.some(tab => tab.value === settings.current.workspace.selectedTab)
+  ? settings.current.workspace.selectedTab
+  : "pdf");
 
 const songs = computed(() => show.value?.songs ?? []);
 const songIndex = computed(() => songs.value.findIndex(s => s.id === props.songId));
+
+// Once the current song is deleted it has no index, so its successor is found by where it was.
+const lastSongIndex = ref(0);
+watch(songIndex, (index) => {
+  if (index >= 0) {
+    lastSongIndex.value = index;
+  }
+});
 
 const vampCardType = computed(() => {
   if (player.playing) {
@@ -144,30 +166,34 @@ player.onSegue(() => {
   selectSong(nextSong.id, true);
 });
 
-// Redirect home on logout if the show is no longer accessible
+// Leave pages the user lost access to, e.g. after signing out
 watch(() => auth.user, (user) => {
-  if (show.value) {
-    const access = getAccessFlags(show.value.permissions, user?.id);
-    if (!access.viewer) {
-      router.replace({ name: "home" });
-    }
-  }
-});
-
-// SONG MANAGEMENT
-
-function openSongDetails(target?: Song): void {
-  songDetailsTarget.value = target;
-  songDetailsVisible.value = true;
-}
-
-async function onSongSaved(saved: Song, { created, playbackChanged }: { created: boolean; playbackChanged: boolean }): Promise<void> {
-  if (created) {
-    show.value?.addSong(saved);
-    selectSong(saved.id);
+  if (!show.value) {
     return;
   }
 
+  const access = getAccessFlags(show.value.permissions, user?.id);
+  if (!access.viewer) {
+    router.replace({ name: "home" });
+  } else if (!access.editor && editMode.value) {
+    router.replace({ name: "song", params: route.params });
+  }
+});
+
+// NAVIGATION
+
+// Player and editor share one history entry, so the browser back button leaves both.
+function toggleEditMode(): void {
+  router.replace({ name: editMode.value ? "song" : "song-edit", params: route.params });
+}
+
+// SONG MANAGEMENT
+
+function openSongDetails(): void {
+  settings.update({ workspace: { editorTab: "details", selectedTab: "pdf", panelVisible: { markers: true } } });
+}
+
+async function onSongSaved(saved: Song, { playbackChanged }: { playbackChanged: boolean }): Promise<void> {
   show.value?.sortSongs();
   if (playbackChanged && saved === song.value) {
     await player.load(saved);
@@ -179,7 +205,7 @@ function onSongDeleted(deleted: Song): void {
     return;
   }
 
-  const next = songs.value[songIndex.value] ?? songs.value[songIndex.value - 1];
+  const next = songs.value[lastSongIndex.value] ?? songs.value[lastSongIndex.value - 1];
   if (next) {
     selectSong(next.id);
   } else {
@@ -215,7 +241,7 @@ function selectSong(songId?: string, autoplay: boolean = false): void {
   // route to the correct song
   if (songId && songId !== props.songId) {
     router.replace({
-      name: "song",
+      name: editMode.value ? "song-edit" : "song",
       params: {
         showId: props.showId,
         songId,
@@ -247,19 +273,13 @@ watch(() => props.songId, async (songId) => {
       return;
     }
 
-    // Consume the edit flag that links from the show page use, so reloading opens the player normally.
-    if (route.query.edit) {
-      const { edit: _, ...query } = route.query;
-      router.replace({ ...route, query });
-    }
-
     // Select the song
     song.value = show.value.songs.find(s => s.id === songId);
     if (!song.value) {
       console.error("Invalid song id:", songId);
       const firstSong = show.value.songs[0];
       if (firstSong) {
-        router.replace({ name: "song", params: { showId: props.showId, songId: firstSong.id } });
+        selectSong(firstSong.id);
       }
 
       return;
@@ -298,34 +318,27 @@ const pdfLoading = ref(false);
   >
     <TransportBar
       class="lg:col-span-3"
-      :model-value="songId"
-      :songs="show?.songs"
-      :loading="showLoading || songLoading"
+      :show="show"
+      :song-id="songId"
       :edit-mode="editMode"
       :can-edit="canEdit"
-      @update:model-value="selectSong($event)"
+      playback
+      @select-song="selectSong($event)"
       @play-pause="playPause"
       @rewind="rewind"
       @forward="forward"
       @toggle-vamp="toggleVamp"
       @toggle-segue="toggleSegue"
-      @toggle-edit-mode="editMode = !editMode"
-      @open-song-details="openSongDetails(song)"
-      @add-song="openSongDetails()"
-      @edit-show="router.push({ name: 'show-edit', params: { showId } })"
+      @toggle-edit-mode="toggleEditMode"
     />
     <ButtonGroup class="w-full lg:hidden">
       <Button
-        v-for="name, tab in {
-          markers: 'Markers',
-          pdf: 'PDF',
-          mixer: 'Mixer',
-        }"
-        :key="tab"
-        :label="name"
-        :severity="settings.current.workspace.selectedTab === tab ? 'primary' : 'secondary'"
+        v-for="tab in tabs"
+        :key="tab.value"
+        :label="tab.label"
+        :severity="selectedTab === tab.value ? 'primary' : 'secondary'"
         fluid
-        @click="settings.update({ workspace: { selectedTab: tab } })"
+        @click="settings.update({ workspace: { selectedTab: tab.value } })"
       />
     </ButtonGroup>
     <!--
@@ -333,27 +346,37 @@ const pdfLoading = ref(false);
       mobile: div acts as a single grid cell where all panels overlap absolutely
     -->
     <div class="relative size-full lg:contents">
-      <!-- Markers Panel -->
+      <!-- Markers Panel (player) or Song Editor Panel (editor) -->
       <div
         class="absolute inset-0 transition-all lg:relative lg:inset-auto lg:size-full"
         :class="[
-          settings.current.workspace.selectedTab !== 'markers' ? 'pointer-events-none invisible lg:pointer-events-auto lg:visible' : '',
-          settings.current.workspace.panelVisible.markers ? 'lg:w-96' : 'lg:w-0',
+          editMode
+            ? ['pointer-events-none z-10 lg:pointer-events-auto', selectedTab !== 'pdf' ? 'invisible lg:visible' : '']
+            : selectedTab !== 'markers' ? 'pointer-events-none invisible lg:pointer-events-auto lg:visible' : '',
+          isStartPanelOpen ? 'lg:w-96' : 'lg:w-0',
         ]"
       >
-        <MarkerPanel
-          class="absolute inset-0 min-h-0"
-          :class="[
-            settings.current.workspace.panelVisible.markers ? 'lg:opacity-100' : 'lg:opacity-0',
-          ]"
+        <SongEditorPanel
+          v-if="editMode"
+          class="pointer-events-auto absolute inset-x-0 bottom-0 max-h-[70%] min-h-0 lg:inset-0 lg:max-h-none"
+          :class="isStartPanelOpen ? 'lg:opacity-100' : 'lg:pointer-events-none lg:opacity-0'"
+          :show="show"
           :song="song"
-          :edit-mode="editMode"
+          @saved="onSongSaved"
+          @deleted="onSongDeleted"
+        />
+        <MarkerPanel
+          v-else-if="hasMarkers"
+          class="absolute inset-0 min-h-0"
+          :class="isStartPanelOpen ? 'lg:opacity-100' : 'lg:opacity-0'"
+          :song="song"
         />
         <Button
+          v-if="hasStartPanel"
           class="absolute top-2 left-full z-10 hidden transition-all lg:block"
-          :class="settings.current.workspace.panelVisible.markers ? 'rounded-l-none' : ''"
-          aria-label="Show Markers Panel"
-          :icon="`pi ${settings.current.workspace.panelVisible.markers ? 'pi-chevron-left' : 'pi-chevron-right'}`"
+          :class="isStartPanelOpen ? 'rounded-l-none' : ''"
+          :aria-label="editMode ? 'Show Editor Panel' : 'Show Markers Panel'"
+          :icon="`pi ${isStartPanelOpen ? 'pi-chevron-left' : 'pi-chevron-right'}`"
           severity="secondary"
           rounded
           @click="settings.togglePanelVisible('markers')"
@@ -363,7 +386,7 @@ const pdfLoading = ref(false);
       <!-- PDF Panel -->
       <div
         class="absolute inset-0 lg:relative lg:inset-auto lg:size-full"
-        :class="settings.current.workspace.selectedTab !== 'pdf' ? 'pointer-events-none invisible lg:pointer-events-auto lg:visible' : ''"
+        :class="selectedTab !== 'pdf' ? 'pointer-events-none invisible lg:pointer-events-auto lg:visible' : ''"
       >
         <div class="absolute inset-0">
           <SongPdfViewer
@@ -414,7 +437,7 @@ const pdfLoading = ref(false);
       <div
         class="absolute inset-0 transition-all lg:relative lg:inset-auto lg:size-full"
         :class="[
-          settings.current.workspace.selectedTab !== 'mixer' ? 'pointer-events-none invisible lg:pointer-events-auto lg:visible' : '',
+          selectedTab !== 'mixer' ? 'pointer-events-none invisible lg:pointer-events-auto lg:visible' : '',
           settings.current.workspace.panelVisible.mixer ? 'lg:w-96' : 'lg:w-0',
         ]"
       >
@@ -425,12 +448,12 @@ const pdfLoading = ref(false);
           ]"
           :song="song"
           :edit-mode="editMode"
-          @open-song-details="openSongDetails(song)"
+          @open-song-details="openSongDetails"
         />
         <Button
           class="absolute top-2 right-full z-10 hidden transition-all lg:block"
           :class="settings.current.workspace.panelVisible.mixer ? 'rounded-r-none' : ''"
-          aria-label="Show Markers Panel"
+          aria-label="Show Mixer Panel"
           :icon="`pi ${settings.current.workspace.panelVisible.mixer ? 'pi-chevron-right' : 'pi-chevron-left'}`"
           severity="secondary"
           rounded
@@ -444,15 +467,6 @@ const pdfLoading = ref(false);
       v-if="showWarpPanel"
       class="lg:col-span-3"
       :song="song"
-    />
-
-    <SongDetailsDialog
-      v-if="show"
-      v-model="songDetailsVisible"
-      :show="show"
-      :song="songDetailsTarget"
-      @saved="onSongSaved"
-      @deleted="onSongDeleted"
     />
   </div>
 </template>

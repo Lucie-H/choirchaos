@@ -9,15 +9,15 @@ import Panel from "primevue/panel";
 import ProgressSpinner from "primevue/progressspinner";
 import { useConfirm } from "primevue/useconfirm";
 import { computed, type Ref, ref, useTemplateRef, watch } from "vue";
-import { useRouter } from "vue-router";
+import { type RouteLocationRaw, useRouter } from "vue-router";
 
 import CoverPicker from "@/components/CoverPicker.vue";
 import DeleteShowDialog from "@/components/DeleteShowDialog.vue";
-import HeaderBar from "@/components/HeaderBar.vue";
+import NewSongDialog from "@/components/NewSongDialog.vue";
 import ShareDialog from "@/components/ShareDialog.vue";
-import SongDetailsDialog from "@/components/SongDetailsDialog.vue";
 import SongImportDialog from "@/components/SongImportDialog.vue";
 import SongSetupStatus from "@/components/SongSetupStatus.vue";
+import TransportBar from "@/components/TransportBar.vue";
 import { useNotify } from "@/composables/useNotify";
 import { RECORDING_FILE_ACCEPT } from "@/core/import/songImport";
 import Show from "@/core/models/show";
@@ -25,12 +25,14 @@ import type Song from "@/core/models/song";
 import { getSongSetup, isFileStep } from "@/core/models/songSetup";
 import { displayFilename } from "@/core/utils/file";
 import { useAuthStore } from "@/stores/auth";
+import { useSettingsStore } from "@/stores/settings";
 
 const props = defineProps<{
   showId: string;
 }>();
 
 const auth = useAuthStore();
+const settings = useSettingsStore();
 const router = useRouter();
 const confirm = useConfirm();
 const { notifyError } = useNotify();
@@ -48,8 +50,7 @@ const shareVisible = ref(false);
 const deleteVisible = ref(false);
 const importFiles = ref<File[]>([]);
 const importVisible = ref(false);
-const detailsVisible = ref(false);
-const detailsSong = ref<Song>();
+const newSongVisible = ref(false);
 const songMenu = ref();
 const songMenuItems = ref<MenuItem[]>([]);
 
@@ -133,30 +134,14 @@ const { isOverDropZone } = useDropZone(dropZone, {
 const fileDialog = useFileDialog({ multiple: true, reset: true, accept: `.pdf,.mid,.midi,.json,application/pdf,audio/midi,application/json,${RECORDING_FILE_ACCEPT}` });
 fileDialog.onChange(files => startImport(Array.from(files ?? [])));
 
-function openDetails(song?: Song): void {
-  detailsSong.value = song;
-  detailsVisible.value = true;
-}
-
-function openInPlayer(song: Song, edit = true): void {
-  router.push({ name: "song", params: { showId: props.showId, songId: song.id }, query: edit ? { edit: "1" } : {} });
+function songRoute(song: Song, name: "song" | "song-edit"): RouteLocationRaw {
+  return { name, params: { showId: props.showId, songId: song.id } };
 }
 
 function continueSetup(song: Song): void {
   const next = getSongSetup(song).next;
-  if (next && isFileStep(next.id)) {
-    openDetails(song);
-  } else {
-    openInPlayer(song);
-  }
-}
-
-function onSongSaved(song: Song, { created }: { created: boolean }): void {
-  if (created) {
-    show.value?.addSong(song);
-  } else {
-    show.value?.sortSongs();
-  }
+  settings.update({ workspace: { editorTab: next && isFileStep(next.id) ? "details" : "measures" } });
+  router.push(songRoute(song, "song-edit"));
 }
 
 function confirmDeleteSong(song: Song): void {
@@ -178,8 +163,7 @@ function confirmDeleteSong(song: Song): void {
 
 function openSongMenu(event: Event, song: Song): void {
   songMenuItems.value = [
-    { label: "Song details", icon: "pi pi-file-edit", command: () => openDetails(song) },
-    { label: "Edit in player", icon: "pi pi-pencil", command: () => openInPlayer(song) },
+    { label: "Edit", icon: "pi pi-pencil", command: () => router.push(songRoute(song, "song-edit")) },
     { separator: true },
     { label: "Delete song", icon: "pi pi-trash", command: () => confirmDeleteSong(song) },
   ];
@@ -205,22 +189,10 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
     ref="dropZone"
     class="relative flex size-full flex-col gap-2 p-2"
   >
-    <HeaderBar
+    <TransportBar
       class="relative z-10"
-      :title="show?.title ?? ''"
-      :back-to="{ name: 'home' }"
-    >
-      <template #end>
-        <Button
-          v-if="songs.length > 0"
-          icon="pi pi-play"
-          label="Open player"
-          aria-label="Open player"
-          pt:label="hidden sm:inline"
-          @click="router.push({ name: 'show', params: { showId } })"
-        />
-      </template>
-    </HeaderBar>
+      :show="show"
+    />
 
     <div
       v-if="loading && !show"
@@ -279,7 +251,7 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
             </div>
           </div>
           <Button
-            label="Share"
+            label="Share..."
             icon="pi pi-user-plus"
             severity="secondary"
             fluid
@@ -293,7 +265,7 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
         >
           <Divider />
           <Button
-            label="Delete show"
+            label="Delete show..."
             icon="pi pi-trash"
             severity="danger"
             size="small"
@@ -321,8 +293,8 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
               class="flex gap-2"
             >
               <Button
-                label="Import files"
-                aria-label="Import files"
+                label="Import files..."
+                aria-label="Import files..."
                 icon="pi pi-upload"
                 severity="secondary"
                 size="small"
@@ -330,13 +302,13 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
                 @click="fileDialog.open()"
               />
               <Button
-                label="New song"
-                aria-label="New song"
+                label="New song..."
+                aria-label="New song..."
                 icon="pi pi-plus"
                 severity="secondary"
                 size="small"
                 pt:label="hidden sm:inline"
-                @click="openDetails()"
+                @click="newSongVisible = true"
               />
             </div>
           </div>
@@ -363,15 +335,15 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
             </div>
             <div class="flex flex-wrap justify-center gap-2">
               <Button
-                label="Choose files"
+                label="Choose files..."
                 icon="pi pi-folder-open"
                 @click="fileDialog.open()"
               />
               <Button
-                label="Add song manually"
+                label="Add song manually..."
                 severity="secondary"
                 text
-                @click="openDetails()"
+                @click="newSongVisible = true"
               />
             </div>
           </div>
@@ -386,10 +358,9 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
               class="flex items-center gap-3 border-b border-(--p-content-border-color) px-2 py-3 last:border-b-0"
             >
               <span class="w-8 font-mono text-muted-color">{{ song.number }}</span>
-              <button
-                type="button"
-                class="min-w-0 flex-1 cursor-pointer text-left"
-                @click="openDetails(song)"
+              <RouterLink
+                :to="songRoute(song, 'song')"
+                class="min-w-0 flex-1 text-left"
               >
                 <div class="truncate font-medium">
                   {{ song.title }}
@@ -398,7 +369,7 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
                   :song="song"
                   compact
                 />
-              </button>
+              </RouterLink>
               <Button
                 icon="pi pi-ellipsis-v"
                 severity="secondary"
@@ -438,13 +409,19 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
                 :key="song.id"
                 class="group cursor-pointer border-t border-(--p-content-border-color) transition-colors hover:bg-surface-50 dark:hover:bg-surface-800/60"
                 :data-testid="`song-row-${song.number}`"
-                @click="openDetails(song)"
+                @click="router.push(songRoute(song, 'song'))"
               >
                 <td class="py-3 pl-2 font-mono text-muted-color">
                   {{ song.number }}
                 </td>
                 <td class="py-3 font-medium">
-                  {{ song.title }}
+                  <RouterLink
+                    :to="songRoute(song, 'song')"
+                    class="focus-visible:underline focus-visible:outline-none"
+                    @click.stop
+                  >
+                    {{ song.title }}
+                  </RouterLink>
                 </td>
                 <td class="max-w-48 py-3 text-sm">
                   <span
@@ -475,16 +452,6 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
                 </td>
                 <td class="py-3 pr-2">
                   <div class="flex justify-end gap-1 transition-opacity mouse:opacity-0 mouse:group-focus-within:opacity-100 mouse:group-hover:opacity-100">
-                    <Button
-                      v-tooltip.top="'Edit in player'"
-                      icon="pi pi-pencil"
-                      severity="secondary"
-                      size="small"
-                      :aria-label="`Edit ${song.title} in player`"
-                      text
-                      rounded
-                      @click.stop="openInPlayer(song)"
-                    />
                     <Button
                       icon="pi pi-ellipsis-v"
                       severity="secondary"
@@ -539,11 +506,10 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
         :show="show"
         :files="importFiles"
       />
-      <SongDetailsDialog
-        v-model="detailsVisible"
+      <NewSongDialog
+        v-model="newSongVisible"
         :show="show"
-        :song="detailsSong"
-        @saved="onSongSaved"
+        @created="show.addSong($event)"
       />
     </template>
   </div>

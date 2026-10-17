@@ -10,9 +10,10 @@ import { binarySearch } from "../utils/binarySearch";
 import type { UrlOrFile } from "../utils/file";
 import type { Numbering } from "../utils/numbering";
 import { inferTrackClassification } from "../utils/trackInference";
-import Measure, { type MeasureLayout, MeasureList } from "./measure";
+import Measure, { isSameLayout, type MeasureLayout, MeasureList, type MeasureReference } from "./measure";
 import type { MeasureDetectionPlan } from "./measureDetection";
-import { MarkerEvent, MeasureEventList, VampEvent } from "./measureEvent";
+import { isEmptyEdit, type MeasureEdit } from "./measureEditing";
+import { MarkerEvent, type MeasureEvent, MeasureEventList, VampEvent } from "./measureEvent";
 import Track from "./track";
 
 export type SongNumber = Numbering;
@@ -46,6 +47,19 @@ export type SongFiles = {
 };
 
 const EMPTY_EVENTS = Object.freeze({ markers: [], vamps: [], segue: false });
+
+function updateEventReferences<T extends MeasureEvent>(
+  list: MeasureEventList<T>,
+  rename: (value: Numbering) => Numbering,
+  removed: Set<Numbering>,
+): void {
+  const events = list.items().filter(event => !removed.has(event.start[0]) && !removed.has(event.end[0]));
+  events.forEach((event) => {
+    event.start = [rename(event.start[0]), event.start[1]];
+    event.end = [rename(event.end[0]), event.end[1]];
+  });
+  list.setItems(events);
+}
 
 export default class Song {
   public playerMode: PlayerMode = "none";
@@ -84,6 +98,7 @@ export default class Song {
     warpMarkers: SongWarpMarker[] = [],
     public readonly permissions: Permissions = NoPermissions,
     public $midiSystemEvents: SystemEvents | object = {},
+    private readonly unnumberedBoxes: MeasureLayout[] = [],
   ) {
     this._tracks = tracks;
     this._audioFiles = audioFiles;
@@ -91,6 +106,11 @@ export default class Song {
 
     this._tracks.forEach((track, i) => track.mixer.index = i);
     this._syncPlayerMode();
+  }
+
+  /** Boxes on the score that detection could not give a number. They wait for the user to number or remove them. */
+  public getUnnumberedBoxes(): readonly MeasureLayout[] {
+    return this.unnumberedBoxes;
   }
 
   // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -105,6 +125,14 @@ export default class Song {
 
   private _serializeMeasures(): any[] {
     return this.measures.items().map(m => m.serialize());
+  }
+
+  private _serializeEvents(): PbRecord {
+    return {
+      markers: this.events.markers.items().map(m => m.serialize()),
+      vamps: this.events.vamps.items().map(v => v.serialize()),
+      segue: this.events.segue,
+    };
   }
 
   private _syncPlayerMode(): void {
@@ -359,34 +387,59 @@ export default class Song {
     await this._save({ measures: this._serializeMeasures() });
   }
 
-  public async removeMeasure(measure: Measure): Promise<void> {
-    this.measures.remove(measure);
-    await this._save({ measures: this._serializeMeasures() });
-  }
-
-  public async setMeasureBeats(measure: Measure, n: number): Promise<void> {
-    measure._applyBeats(n);
-    await this._save({ measures: this._serializeMeasures() });
-  }
-
   public applyMeasureLayout(measure: Measure, layout: MeasureLayout | undefined): void {
     measure._applyLayout(layout);
   }
 
   /**
-   * Moves the layout of a measure to the measure with the given number. If that measure already
-   * has a layout, the two layouts swap, so a mislabelled box can be fixed in one step.
+   * Applies a whole measure edit in one save. Renamed and deleted measures carry their warp
+   * markers, markers and vamps along, so no reference points to a measure that is gone.
    */
-  public async reassignMeasureLayout(measure: Measure, targetValue: Numbering): Promise<void> {
-    const target = this.measures.items().find(m => m.value === targetValue);
-    if (!target || target === measure) {
+  public async applyMeasureEdit(edit: MeasureEdit): Promise<void> {
+    if (isEmptyEdit(edit)) {
       return;
     }
 
-    const targetLayout = target.layout;
-    target._applyLayout(measure.layout);
-    measure._applyLayout(targetLayout);
-    await this.saveMeasures();
+    edit.layouts.forEach((layout, measure) => measure._applyLayout(layout));
+    edit.beats.forEach((beats, measure) => measure._applyBeats(beats));
+
+    const renames = new Map([...edit.renames].map(([measure, value]) => [measure.value, value]));
+    edit.renames.forEach((value, measure) => measure.value = value);
+
+    const removed = new Set(edit.removals.map(measure => measure.value));
+    const kept = this.measures.items().filter(measure => !removed.has(measure.value));
+    this.measures.setItems([...kept, ...edit.additions]);
+
+    const fields: PbRecord = { measures: this._serializeMeasures() };
+    if (edit.resolvedBoxes.length > 0) {
+      this.removeUnnumberedBoxes(edit.resolvedBoxes);
+      fields.unnumberedBoxes = this.unnumberedBoxes;
+    }
+
+    if (renames.size > 0 || removed.size > 0) {
+      this._updateMeasureReferences(renames, removed);
+      fields.warpMarkers = this._warpMarkers;
+      fields.events = this._serializeEvents();
+    }
+
+    await this._save(fields);
+  }
+
+  private removeUnnumberedBoxes(resolved: readonly MeasureLayout[]): void {
+    const kept = this.unnumberedBoxes.filter(box => !resolved.some(other => isSameLayout(box, other)));
+    this.unnumberedBoxes.splice(0, this.unnumberedBoxes.length, ...kept);
+  }
+
+  private _updateMeasureReferences(renames: Map<Numbering, Numbering>, removed: Set<Numbering>): void {
+    const rename = (value: Numbering): Numbering => renames.get(value) ?? value;
+
+    const warpMarkers = this._warpMarkers
+      .filter(marker => !removed.has(marker.measure))
+      .map(marker => ({ ...marker, measure: rename(marker.measure) }));
+    this._warpMarkers.splice(0, this._warpMarkers.length, ...warpMarkers);
+
+    updateEventReferences(this.events.markers, rename, removed);
+    updateEventReferences(this.events.vamps, rename, removed);
   }
 
   public async applyMeasureDetection(plan: MeasureDetectionPlan): Promise<void> {
@@ -398,11 +451,44 @@ export default class Song {
       this.measures.insert(measure);
     }
 
-    await this.saveMeasures();
+    this.unnumberedBoxes.push(...plan.unnumbered);
+    await this._save({ measures: this._serializeMeasures(), unnumberedBoxes: this.unnumberedBoxes });
   }
 
   public async saveMeasures(): Promise<void> {
     await this._save({ measures: this._serializeMeasures() });
+  }
+
+  // Markers only label the timeline, so editing them never needs a player reload.
+  public async addMarker(start: MeasureReference, name: string): Promise<MarkerEvent> {
+    const marker = new MarkerEvent(start, name);
+    marker.$startTick = this.findMeasure(start[0])?.$beatTicks[start[1]];
+    this.events.markers.insert(marker);
+    await this._save({ events: this._serializeEvents() });
+    return marker;
+  }
+
+  public async updateMarker(marker: MarkerEvent, start: MeasureReference, name: string): Promise<void> {
+    this.removeMarkerEvent(marker);
+    marker.start = start;
+    marker.end = start;
+    marker.marker = name;
+    marker.$startTick = this.findMeasure(start[0])?.$beatTicks[start[1]];
+    this.events.markers.insert(marker);
+    await this._save({ events: this._serializeEvents() });
+  }
+
+  public async removeMarker(marker: MarkerEvent): Promise<void> {
+    this.removeMarkerEvent(marker);
+    await this._save({ events: this._serializeEvents() });
+  }
+
+  // Markers can share a start, so they are removed by identity instead of by position.
+  private removeMarkerEvent(marker: MarkerEvent): void {
+    const index = this.events.markers.items().indexOf(marker);
+    if (index !== -1) {
+      this.events.markers.removeAt(index);
+    }
   }
 
   // ── Warp marker mutations ─────────────────────────────────────────────────────
@@ -443,16 +529,13 @@ export default class Song {
       audioFiles: this._audioFiles,
       tracks: this._serializeTracks(),
       measures: this._serializeMeasures(),
-      events: {
-        markers: this.events.markers.items().map(m => m.serialize()),
-        vamps: this.events.vamps.items().map(v => v.serialize()),
-        segue: this.events.segue,
-      },
+      events: this._serializeEvents(),
       warpMarkers: this._warpMarkers,
+      unnumberedBoxes: this.unnumberedBoxes,
     };
   }
 
-  public static deserialize({ id, number, title, midiFile, jsonFile, pdfFile, audioFiles, tracks, measures, events, warpMarkers }: PbRecord, showPermissions?: Permissions): Song {
+  public static deserialize({ id, number, title, midiFile, jsonFile, pdfFile, audioFiles, tracks, measures, events, warpMarkers, unnumberedBoxes }: PbRecord, showPermissions?: Permissions): Song {
     const measureList = new MeasureList(measures.map((m: PbRecord) => Measure.deserialize(m)));
 
     // Convert all warp markers from using indices to using measure numbers
@@ -478,6 +561,8 @@ export default class Song {
       },
       songWarpMarkers,
       showPermissions ?? NoPermissions,
+      {},
+      Array.isArray(unnumberedBoxes) ? unnumberedBoxes : [],
     );
   }
 
@@ -494,9 +579,10 @@ export default class Song {
     formData.append("measures", "[]");
     formData.append("events", JSON.stringify(EMPTY_EVENTS));
     formData.append("warpMarkers", "[]");
+    formData.append("unnumberedBoxes", "[]");
 
     const record = await dbCreateWithFiles("songs", formData);
-    const song = Song.deserialize({ ...record, tracks: [], measures: [], events: EMPTY_EVENTS, warpMarkers: [] }, permissions);
+    const song = Song.deserialize({ ...record, tracks: [], measures: [], events: EMPTY_EVENTS, warpMarkers: [], unnumberedBoxes: [] }, permissions);
     await song.addFiles(files);
     return song;
   }

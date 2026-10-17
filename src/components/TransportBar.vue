@@ -2,16 +2,16 @@
 import Button from "primevue/button";
 import InputNumber from "primevue/inputnumber";
 import InputText from "primevue/inputtext";
-import Select from "primevue/select";
 import Slider from "primevue/slider";
 import Toolbar from "primevue/toolbar";
 import { computed, type ComputedRef } from "vue";
 
-import Song from "@/core/models/song";
+import type Show from "@/core/models/show";
 import { usePlayerStore } from "@/stores/player";
 import { useSettingsStore } from "@/stores/settings";
 
 import PopoverButton from "./PopoverButton.vue";
+import ShowBreadcrumb from "./ShowBreadcrumb.vue";
 import DottedHalfNoteSvg from "./svg/DottedHalfNoteSvg.vue";
 import DottedQuarterNoteSvg from "./svg/DottedQuarterNoteSvg.vue";
 import HalfNoteSvg from "./svg/HalfNoteSvg.vue";
@@ -33,9 +33,14 @@ const NOTE_VALUE_SVG_MAP: Record<NoteValue, object> = {
   dottedHalf: DottedHalfNoteSvg,
 };
 
+// The breadcrumb shares the row with the Edit toggle. Below sm, and from lg up where the transport
+// shares the row too, it only fits when they drop their labels.
+const NARROW_HIDDEN_LABEL = "hidden sm:inline lg:hidden xl:inline";
+
 const props = defineProps<{
-  songs?: Song[];
-  loading?: boolean;
+  show?: Show;
+  songId?: string;
+  playback?: boolean;
   editMode?: boolean;
   canEdit?: boolean;
 }>();
@@ -47,13 +52,11 @@ const emit = defineEmits([
   "toggleVamp",
   "toggleSegue",
   "toggleEditMode",
-  "openSongDetails",
-  "addSong",
-  "editShow",
+  "selectSong",
 ]);
 
-const songId = defineModel<string>();
-const songIndex = computed(() => props.songs?.findIndex(s => s.id === songId.value) ?? 0);
+const songs = computed(() => props.show?.songs ?? []);
+const songIndex = computed(() => songs.value.findIndex(s => s.id === props.songId));
 
 const player = usePlayerStore();
 const settingsStore = useSettingsStore();
@@ -80,50 +83,36 @@ const playbackSpeedPercentage = computed({
 <template>
   <div class="relative">
     <Toolbar
-      class="relative grid grid-cols-[auto_auto] px-4 lg:grid-cols-[repeat(3,auto)] lg:overflow-x-auto"
-      pt:start="col-span-2 lg:col-span-1 flex justify-stretch lg:justify-start items-center gap-8 min-w-0 overflow-hidden"
-      pt:center="flex justify-center items-center -space-x-2 sm:space-x-0"
+      class="relative px-4"
+      :class="playback ? 'grid grid-cols-[auto_auto] lg:grid-cols-[repeat(3,auto)] lg:overflow-x-auto' : 'flex-nowrap'"
+      pt:start="col-span-2 lg:col-span-1 flex justify-stretch lg:justify-start items-center gap-4 sm:gap-8 min-w-0 overflow-hidden"
+      pt:center="flex justify-center items-center"
       pt:end="overflow-x-auto lg:overflow-x-visible min-w-0"
     >
       <template #start>
-        <Select
-          v-model="songId"
-          class="w-full min-w-0 border-none whitespace-nowrap lg:w-88"
-          :options="songs"
-          option-value="id"
-          :option-label="song => `#${song.number} ${song.title}`"
-          scroll-height="70vh"
-          aria-label="Song"
-        >
-          <template
-            v-if="canEdit"
-            #footer
-          >
-            <div class="flex gap-1 border-t border-(--p-content-border-color) p-1">
-              <Button
-                label="Add song"
-                icon="pi pi-plus"
-                severity="secondary"
-                size="small"
-                class="flex-1"
-                text
-                @click="emit('addSong')"
-              />
-              <Button
-                label="Edit show"
-                icon="pi pi-cog"
-                severity="secondary"
-                size="small"
-                class="flex-1"
-                text
-                @click="emit('editShow')"
-              />
-            </div>
-          </template>
-        </Select>
+        <ShowBreadcrumb
+          :show="show"
+          :song-id="songId"
+          @select-song="emit('selectSong', $event)"
+        />
+        <Button
+          v-if="canEdit && songId"
+          label="Edit"
+          icon="pi pi-pencil"
+          :severity="editMode ? 'primary' : 'secondary'"
+          :aria-pressed="editMode"
+          aria-label="Edit"
+          class="flex-none"
+          :pt:label="NARROW_HIDDEN_LABEL"
+          @click="emit('toggleEditMode')"
+        />
+        <slot name="actions" />
       </template>
 
-      <template #center>
+      <template
+        v-if="playback"
+        #center
+      >
         <Button
           :disabled="songIndex === 0 && player.position <= 0"
           :icon="`pi ${player.position > 0 ? 'pi-backward' : 'pi-step-backward'}`"
@@ -143,7 +132,7 @@ const playbackSpeedPercentage = computed({
         />
         <Button
           class="flex-none"
-          :disabled="songIndex >= (songs?.length ?? 1) - 1"
+          :disabled="songIndex >= songs.length - 1"
           icon="pi pi-step-forward"
           severity="secondary"
           aria-label="Next Song"
@@ -151,206 +140,194 @@ const playbackSpeedPercentage = computed({
           text
           @click="emit('forward')"
         />
-        <Button
-          v-if="canEdit"
-          icon="pi pi-pencil"
-          :severity="editMode ? 'primary' : 'secondary'"
-          aria-label="Toggle Edit Mode"
-          rounded
-          text
-          @click="emit('toggleEditMode')"
-        />
-        <Button
-          v-if="canEdit && editMode"
-          v-tooltip.bottom="'Song details'"
-          icon="pi pi-file-edit"
-          severity="secondary"
-          aria-label="Song details"
-          rounded
-          text
-          @click="emit('openSongDetails')"
-        />
       </template>
 
       <template #end>
         <div class="flex items-center justify-end gap-4 sm:gap-8">
-          <!-- Measure -->
-          <div
-            v-if="visibleButtons.measure"
-            class="flex items-center justify-end gap-1"
-          >
+          <template v-if="playback">
+            <!-- Measure -->
+            <div
+              v-if="visibleButtons.measure"
+              class="flex items-center justify-end gap-1"
+            >
+              <PopoverButton
+                button-class="w-12 whitespace-nowrap"
+                :label="player.ready ? player.currentMeasure[0] : '-'"
+                :disabled="!player.ready"
+              >
+                <template #default="{ setFocusTarget }">
+                  <InputText
+                    :ref="setFocusTarget"
+                    :model-value="player.currentMeasure[0]"
+                    class="w-16"
+                    fluid
+                    @change="player.setMeasure(($event.target as HTMLInputElement).value)"
+                  />
+                </template>
+              </PopoverButton>
+              .
+              <PopoverButton
+                button-class="w-8 whitespace-nowrap"
+                :label="player.ready && player.mode === 'midi' ? String(player.currentMeasure[1] + 1) : '-'"
+                :disabled="!player.ready || player.mode !== 'midi'"
+              >
+                <template #default="{ setFocusTarget }">
+                  <InputNumber
+                    :ref="setFocusTarget"
+                    :model-value="player.currentMeasure[1] + 1"
+                    class="w-16"
+                    fluid
+                    @update:model-value="player.setBeat($event - 1)"
+                  />
+                </template>
+              </PopoverButton>
+            </div>
+
+            <!-- Transposition -->
             <PopoverButton
-              button-class="w-12 whitespace-nowrap"
-              :label="player.ready ? player.currentMeasure[0] : '-'"
-              :disabled="!player.ready"
+              v-if="visibleButtons.transposition"
+              button-class="w-16 whitespace-nowrap"
+              :label="`${player.playbackTransposition > 0 ? '+' : ''}${player.playbackTransposition}&nbsp;HT`"
+              :active="player.playbackTransposition !== 0"
             >
               <template #default="{ setFocusTarget }">
-                <InputText
-                  :ref="setFocusTarget"
-                  :model-value="player.currentMeasure[0]"
-                  class="w-16"
-                  fluid
-                  @change="player.setMeasure(($event.target as HTMLInputElement).value)"
-                />
+                <div class="flex items-center justify-stretch gap-1">
+                  <Button
+                    icon="pi pi-minus"
+                    severity="secondary"
+                    size="small"
+                    rounded
+                    text
+                    :disabled="player.playbackTransposition <= -12"
+                    @click="player.playbackTransposition--"
+                  />
+                  <InputNumber
+                    :ref="setFocusTarget"
+                    v-model="player.playbackTransposition"
+                    class="w-20"
+                    :min="-12"
+                    :max="12"
+                    :step="1"
+                    :prefix="player.playbackTransposition > 0 ? '+' : ''"
+                    suffix=" HT"
+                    fluid
+                  />
+                  <Button
+                    icon="pi pi-plus"
+                    severity="secondary"
+                    size="small"
+                    rounded
+                    text
+                    :disabled="player.playbackTransposition >= 12"
+                    @click="player.playbackTransposition++"
+                  />
+                </div>
               </template>
             </PopoverButton>
-            .
+
+            <!-- Tempo -->
             <PopoverButton
-              button-class="w-8 whitespace-nowrap"
-              :label="player.ready && player.mode === 'midi' ? String(player.currentMeasure[1] + 1) : '-'"
-              :disabled="!player.ready || player.mode !== 'midi'"
+              v-if="visibleButtons.tempo"
+              button-class="w-22 whitespace-nowrap"
+              :active="Math.round(playbackSpeedPercentage) !== 100"
             >
+              <template #button>
+                <template v-if="player.mode === 'midi'">
+                  <component
+                    :is="NOTE_VALUE_SVG_MAP[tempoNoteValue]"
+                    class="mx-[-15%] inline size-6 fill-current"
+                  />=&nbsp;{{ player.ready ? Math.round(player.playbackSpeed * writtenTempo) : "-" }}
+                </template>
+                <template v-else>
+                  {{ Math.round(playbackSpeedPercentage) === 100 ? 'Tempo' : `${Math.round(playbackSpeedPercentage)} %` }}
+                </template>
+              </template>
+
               <template #default="{ setFocusTarget }">
-                <InputNumber
-                  :ref="setFocusTarget"
-                  :model-value="player.currentMeasure[1] + 1"
-                  class="w-16"
-                  fluid
-                  @update:model-value="player.setBeat($event - 1)"
-                />
+                <div class="flex items-center justify-stretch gap-4">
+                  <Button
+                    icon="pi pi-minus"
+                    severity="secondary"
+                    size="small"
+                    rounded
+                    text
+                    :disabled="playbackSpeedPercentage <= 10"
+                    @click="playbackSpeedPercentage--"
+                  />
+                  <InputNumber
+                    :ref="setFocusTarget"
+                    v-model="playbackSpeedPercentage"
+                    class="w-18"
+                    :min="10"
+                    :max="300"
+                    :step="1"
+                    suffix=" %"
+                    fluid
+                  />
+                  <Button
+                    icon="pi pi-plus"
+                    severity="secondary"
+                    size="small"
+                    rounded
+                    text
+                    :disabled="playbackSpeedPercentage >= 300"
+                    @click="playbackSpeedPercentage++"
+                  />
+                </div>
               </template>
             </PopoverButton>
-          </div>
 
-          <!-- Transposition -->
-          <PopoverButton
-            v-if="visibleButtons.transposition"
-            button-class="w-16 whitespace-nowrap"
-            :label="`${player.playbackTransposition > 0 ? '+' : ''}${player.playbackTransposition}&nbsp;HT`"
-            :active="player.playbackTransposition !== 0"
-          >
-            <template #default="{ setFocusTarget }">
-              <div class="flex items-center justify-stretch gap-1">
-                <Button
-                  icon="pi pi-minus"
-                  severity="secondary"
-                  size="small"
-                  rounded
-                  text
-                  :disabled="player.playbackTransposition <= -12"
-                  @click="player.playbackTransposition--"
-                />
-                <InputNumber
-                  :ref="setFocusTarget"
-                  v-model="player.playbackTransposition"
-                  class="w-20"
-                  :min="-12"
-                  :max="12"
-                  :step="1"
-                  :prefix="player.playbackTransposition > 0 ? '+' : ''"
-                  suffix=" HT"
-                  fluid
-                />
-                <Button
-                  icon="pi pi-plus"
-                  severity="secondary"
-                  size="small"
-                  rounded
-                  text
-                  :disabled="player.playbackTransposition >= 12"
-                  @click="player.playbackTransposition++"
-                />
-              </div>
-            </template>
-          </PopoverButton>
-
-          <!-- Tempo -->
-          <PopoverButton
-            v-if="visibleButtons.tempo"
-            button-class="w-22 whitespace-nowrap"
-            :active="Math.round(playbackSpeedPercentage) !== 100"
-          >
-            <template #button>
+            <!-- Time Signature -->
+            <Button
+              v-if="visibleButtons.timeSignature"
+              class="cursor-default"
+              severity="secondary"
+            >
               <template v-if="player.mode === 'midi'">
-                <component
-                  :is="NOTE_VALUE_SVG_MAP[tempoNoteValue]"
-                  class="mx-[-15%] inline size-6 fill-current"
-                />=&nbsp;{{ player.ready ? Math.round(player.playbackSpeed * writtenTempo) : "-" }}
+                {{ player.currentTimeSignature[0] }}&nbsp;/&nbsp;{{ Math.pow(2, player.currentTimeSignature[1]) }}
               </template>
               <template v-else>
-                {{ Math.round(playbackSpeedPercentage) === 100 ? 'Tempo' : `${Math.round(playbackSpeedPercentage)} %` }}
+                &ndash;&nbsp;/&nbsp;&ndash;
               </template>
-            </template>
+            </Button>
 
-            <template #default="{ setFocusTarget }">
-              <div class="flex items-center justify-stretch gap-4">
-                <Button
-                  icon="pi pi-minus"
-                  severity="secondary"
-                  size="small"
-                  rounded
-                  text
-                  :disabled="playbackSpeedPercentage <= 10"
-                  @click="playbackSpeedPercentage--"
-                />
-                <InputNumber
-                  :ref="setFocusTarget"
-                  v-model="playbackSpeedPercentage"
-                  class="w-18"
-                  :min="10"
-                  :max="300"
-                  :step="1"
-                  suffix=" %"
-                  fluid
-                />
-                <Button
-                  icon="pi pi-plus"
-                  severity="secondary"
-                  size="small"
-                  rounded
-                  text
-                  :disabled="playbackSpeedPercentage >= 300"
-                  @click="playbackSpeedPercentage++"
-                />
-              </div>
-            </template>
-          </PopoverButton>
+            <!-- Vamp -->
+            <Button
+              v-if="visibleButtons.vamp"
+              class="w-24 whitespace-nowrap"
+              :disabled="vampState === 'none'"
+              :label="{
+                'none': 'Vamp',
+                'vamping': player.currentVamp?.iterations
+                  ? `Vamp ${(player.currentVamp?.currentIteration ?? 0) + 1}/${player.currentVamp?.iterations}`
+                  : `Vamp ${(player.currentVamp?.currentIteration ?? 0) + 1}`,
+                'exiting': 'Exiting...'
+              }[vampState]"
+              :severity="vampState === 'vamping' ? 'primary': 'secondary'"
+              @click="emit('toggleVamp')"
+            />
 
-          <!-- Time Signature -->
-          <Button
-            v-if="visibleButtons.timeSignature"
-            class="cursor-default"
-            severity="secondary"
-          >
-            <template v-if="player.mode === 'midi'">
-              {{ player.currentTimeSignature[0] }}&nbsp;/&nbsp;{{ Math.pow(2, player.currentTimeSignature[1]) }}
-            </template>
-            <template v-else>
-              &ndash;&nbsp;/&nbsp;&ndash;
-            </template>
-          </Button>
-
-          <!-- Vamp -->
-          <Button
-            v-if="visibleButtons.vamp"
-            class="w-24 whitespace-nowrap"
-            :disabled="vampState === 'none'"
-            :label="{
-              'none': 'Vamp',
-              'vamping': player.currentVamp?.iterations
-                ? `Vamp ${(player.currentVamp?.currentIteration ?? 0) + 1}/${player.currentVamp?.iterations}`
-                : `Vamp ${(player.currentVamp?.currentIteration ?? 0) + 1}`,
-              'exiting': 'Exiting...'
-            }[vampState]"
-            :severity="vampState === 'vamping' ? 'primary': 'secondary'"
-            @click="emit('toggleVamp')"
-          />
-
-          <!-- Segue -->
-          <Button
-            v-if="visibleButtons.segue"
-            class="w-24 whitespace-nowrap"
-            :disabled="player.currentSegue === undefined"
-            label="Segue"
-            :severity="player.currentSegue?.enabled ? 'primary': 'secondary'"
-            @click="emit('toggleSegue')"
-          />
+            <!-- Segue -->
+            <Button
+              v-if="visibleButtons.segue"
+              class="w-24 whitespace-nowrap"
+              :disabled="player.currentSegue === undefined"
+              label="Segue"
+              :severity="player.currentSegue?.enabled ? 'primary': 'secondary'"
+              @click="emit('toggleSegue')"
+            />
+          </template>
 
           <!-- User menu -->
           <UserMenuButton class="-m-1 -ml-4" />
         </div>
       </template>
     </Toolbar>
+
+    <span
+      v-if="!playback"
+      class="pointer-events-none absolute top-1/2 left-1/2 hidden -translate-1/2 text-xl font-bold md:block"
+    >Choir Chaos</span>
 
     <!-- Progress Bar -->
     <!-- <div
@@ -364,6 +341,7 @@ const playbackSpeedPercentage = computed({
       }"
     /> -->
     <div
+      v-if="playback"
       class="absolute -bottom-0.5 left-2 h-1 w-[calc(100%-1rem)]"
     >
       <Slider

@@ -4,6 +4,8 @@ import { dbCreateWithFiles, dbDelete, dbUpdate, dbUpdateWithFiles } from "@/pock
 import { makeMtiJson, TRACK_NAMES } from "@/test/fixtures";
 
 import Measure, { MeasureList } from "./measure";
+import { createEmptyEdit, type MeasureEdit } from "./measureEditing";
+import { MarkerEvent, MeasureEventList, VampEvent } from "./measureEvent";
 import Song from "./song";
 import Track from "./track";
 
@@ -167,9 +169,10 @@ describe("Song details and files", () => {
     const song = await Song.create("show-id", { number: "2", title: "New" });
 
     const entries = Object.fromEntries(vi.mocked(dbCreateWithFiles).mock.calls[0]![1].entries());
-    expect(entries).toMatchObject({ show: "show-id", number: "2", title: "New", tracks: "[]", measures: "[]" });
+    expect(entries).toMatchObject({ show: "show-id", number: "2", title: "New", tracks: "[]", measures: "[]", unnumberedBoxes: "[]" });
     expect(JSON.parse(entries.events as string)).toEqual({ markers: [], vamps: [], segue: false });
     expect([song.id, song.number, song.title]).toEqual(["new-id", "2", "New"]);
+    expect(song.getUnnumberedBoxes()).toEqual([]);
   });
 
   it("deletes itself", async () => {
@@ -179,51 +182,75 @@ describe("Song details and files", () => {
   });
 });
 
-describe("Song measure layouts", () => {
+describe("Song measure edits", () => {
   const layoutA = { page: 0, x: 0.1, y: 0, width: 0.1, height: 0.1 };
   const layoutB = { page: 0, x: 0.5, y: 0, width: 0.1, height: 0.1 };
 
   function makeMeasureSong(): Song {
-    return new Song("song-id", "1", "Song", undefined, undefined, undefined, [], [], new MeasureList([
-      new Measure("1", 4, layoutA),
-      new Measure("2", 4),
-      new Measure("3", 4, layoutB),
-    ]));
+    const measures = new MeasureList([new Measure("1", 4, layoutA), new Measure("2", 4), new Measure("3", 4, layoutB)]);
+    const events = {
+      markers: new MeasureEventList<MarkerEvent>([new MarkerEvent(["3", 0], "B")]),
+      vamps: new MeasureEventList<VampEvent>([new VampEvent(["1", 0], ["2", 0], 2)]),
+      segue: false,
+    };
+    return new Song("song-id", "1", "Song", undefined, undefined, undefined, ["a.mp3"], [], measures, events, [
+      { measure: "1", time: 0 },
+      { measure: "3", time: 4 },
+    ]);
+  }
+
+  function edit(changes: Partial<MeasureEdit>): MeasureEdit {
+    return { ...createEmptyEdit(), ...changes };
   }
 
   afterEach(() => {
     vi.clearAllMocks();
   });
 
-  it("moves a layout to a measure without one", async () => {
+  it("applies layouts and beats in one save", async () => {
     const song = makeMeasureSong();
+    const [one, two] = song.measures.items();
 
-    await song.reassignMeasureLayout(song.measures.items()[0]!, "2");
+    await song.applyMeasureEdit(edit({ layouts: new Map([[one!, undefined], [two!, layoutA]]), beats: new Map([[two!, 3]]) }));
 
-    expect(song.measures.items().map(m => m.layout)).toEqual([undefined, layoutA, layoutB]);
+    expect(song.measures.items().map(m => [m.beats, m.layout])).toEqual([[4, undefined], [3, layoutA], [4, layoutB]]);
     expect(dbUpdate).toHaveBeenCalledTimes(1);
+    expect(dbUpdate).toHaveBeenCalledWith("songs", "song-id", { measures: expect.any(Array) });
   });
 
-  it("swaps layouts with a measure that already has one", async () => {
+  it("keeps the list sorted and moves references along with renamed measures", async () => {
     const song = makeMeasureSong();
+    const three = song.measures.items()[2]!;
 
-    await song.reassignMeasureLayout(song.measures.items()[0]!, "3");
+    await song.applyMeasureEdit(edit({ renames: new Map([[three, "0"]]) }));
 
-    expect(song.measures.items().map(m => m.layout)).toEqual([layoutB, undefined, layoutA]);
+    expect(song.measures.items().map(m => m.value)).toEqual(["0", "1", "2"]);
+    expect(song.warpMarkers.map(m => m.measure)).toEqual(["1", "0"]);
+    expect(song.events.markers.items()[0]!.start).toEqual(["0", 0]);
   });
 
-  it("ignores unknown measure numbers", async () => {
+  it("drops the references of deleted measures", async () => {
     const song = makeMeasureSong();
+    const one = song.measures.items()[0]!;
 
-    await song.reassignMeasureLayout(song.measures.items()[0]!, "9");
+    await song.applyMeasureEdit(edit({ removals: [one] }));
 
-    expect(song.measures.items()[0]!.layout).toEqual(layoutA);
+    expect(song.measures.items().map(m => m.value)).toEqual(["2", "3"]);
+    expect(song.warpMarkers.map(m => m.measure)).toEqual(["3"]);
+    expect(song.events.vamps.items()).toEqual([]);
+    expect(song.events.markers.items()).toHaveLength(1);
+  });
+
+  it("does not save an empty edit", async () => {
+    await makeMeasureSong().applyMeasureEdit(createEmptyEdit());
+
     expect(dbUpdate).not.toHaveBeenCalled();
   });
 });
 
 describe("Song measure detection", () => {
   const layout = { page: 1, x: 0.2, y: 0.3, width: 0.2, height: 0.1 };
+  const box = { page: 1, x: 0.6, y: 0.3, width: 0.2, height: 0.1 };
 
   afterEach(() => {
     vi.clearAllMocks();
@@ -239,8 +266,7 @@ describe("Song measure detection", () => {
       placements: [{ measure: song.measures.items()[0]!, layout }],
       additions: [new Measure("2", 3, layout)],
       keptPlaced: [],
-      duplicates: [],
-      unmatched: [],
+      unnumbered: [box],
       lowConfidence: [],
     });
 
@@ -249,6 +275,89 @@ describe("Song measure detection", () => {
       ["2", 3, layout],
       ["3", 4, undefined],
     ]);
+    expect(song.getUnnumberedBoxes()).toEqual([box]);
     expect(dbUpdate).toHaveBeenCalledTimes(1);
+    expect(dbUpdate).toHaveBeenCalledWith("songs", "song-id", { measures: expect.any(Array), unnumberedBoxes: [box] });
+  });
+});
+
+describe("Song unnumbered boxes", () => {
+  const box = { page: 0, x: 0.2, y: 0.3, width: 0.2, height: 0.1 };
+  const record = {
+    id: "song-id",
+    number: "1",
+    title: "Song",
+    audioFiles: [],
+    tracks: [],
+    measures: [{ value: "1", beats: 4, layout: { ...box, review: true } }],
+    events: { markers: [], vamps: [], segue: false },
+    warpMarkers: [],
+  };
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("loads records without unnumbered boxes", () => {
+    expect(Song.deserialize(record).getUnnumberedBoxes()).toEqual([]);
+    expect(Song.deserialize({ ...record, unnumberedBoxes: null }).getUnnumberedBoxes()).toEqual([]);
+  });
+
+  it("round-trips unnumbered boxes and review flags", () => {
+    const song = Song.deserialize({ ...record, unnumberedBoxes: [box] });
+
+    expect(song.serialize()).toMatchObject({ unnumberedBoxes: [box], measures: [{ layout: { ...box, review: true } }] });
+  });
+
+  it("removes resolved boxes by position in the same save", async () => {
+    const song = Song.deserialize({ ...record, unnumberedBoxes: [box, { ...box, page: 1 }] });
+
+    await song.applyMeasureEdit({ ...createEmptyEdit(), resolvedBoxes: [{ ...box }] });
+
+    expect(song.getUnnumberedBoxes()).toEqual([{ ...box, page: 1 }]);
+    expect(dbUpdate).toHaveBeenCalledWith("songs", "song-id", { measures: expect.any(Array), unnumberedBoxes: [{ ...box, page: 1 }] });
+  });
+});
+
+describe("Song markers", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function savedMarkers(): unknown {
+    const fields = vi.mocked(dbUpdate).mock.calls.at(-1)![2] as { events: { markers: unknown } };
+    return fields.events.markers;
+  }
+
+  it("adds markers in measure order", async () => {
+    const song = makeSong();
+    await song.addMarker(["5", 0], "B");
+    await song.addMarker(["1", 0], "A");
+
+    expect(song.events.markers.items().map(m => m.marker)).toEqual(["A", "B"]);
+    expect(savedMarkers()).toEqual([
+      { type: "marker", start: ["1", 0], marker: "A" },
+      { type: "marker", start: ["5", 0], marker: "B" },
+    ]);
+  });
+
+  it("keeps the order when a marker moves", async () => {
+    const song = makeSong();
+    const first = await song.addMarker(["1", 0], "A");
+    await song.addMarker(["5", 0], "B");
+
+    await song.updateMarker(first, ["9", 0], "C");
+
+    expect(song.events.markers.items().map(m => [m.start[0], m.marker])).toEqual([["5", "B"], ["9", "C"]]);
+  });
+
+  it("removes only the given marker when two share a measure", async () => {
+    const song = makeSong();
+    await song.addMarker(["3", 0], "A");
+    const second = await song.addMarker(["3", 0], "B");
+
+    await song.removeMarker(second);
+
+    expect(song.events.markers.items().map(m => m.marker)).toEqual(["A"]);
   });
 });

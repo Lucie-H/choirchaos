@@ -143,50 +143,51 @@ test.describe("show management", () => {
     expect(songs[0]!.title).toBe(MINIMAL.title);
   });
 
-  test("song details rename, renumber and delete a song", async ({ page, admin, factory, loginAs }) => {
+  test("the song editor's details rename, renumber and delete a song", async ({ page, admin, factory, loginAs }) => {
     const owner = await factory.createUser();
     const show = await factory.createShow(owner);
     const song = await factory.createSong(owner, show, await buildSongBundle(MINIMAL, { mode: "none", withPdf: false }));
-    await factory.createSong(owner, show, await buildSongBundle(CONDUCTOR, { mode: "none", withPdf: false }));
+    const other = await factory.createSong(owner, show, await buildSongBundle(CONDUCTOR, { mode: "none", withPdf: false }));
     await loginAs(owner);
     await page.goto(`/show/${show.id}/edit`);
 
-    await page.getByTestId(`song-row-${song.number}`).click();
-    const dialog = page.getByRole("dialog", { name: "Song details" });
-    await dialog.getByLabel("No.").fill(CONDUCTOR.number);
-    await dialog.getByRole("button", { name: "Save" }).click();
-    await expect(dialog.getByText(`Song ${CONDUCTOR.number} already exists.`)).toBeVisible();
+    await page.getByRole("button", { name: `Options for ${song.title}` }).click();
+    await expect(page.getByRole("menuitem", { name: "Details..." })).toHaveCount(0);
+    await page.getByRole("menuitem", { name: "Edit" }).click();
+    await page.getByRole("tab", { name: "Details" }).click();
+    const panel = page.getByRole("tabpanel", { name: "Details" });
 
-    await dialog.getByLabel("No.").fill("12a");
-    await dialog.getByLabel("Title").fill("Renamed");
-    await dialog.getByRole("button", { name: "Save" }).click();
-    await expect(dialog).toBeHidden();
+    await panel.getByLabel("No.").fill(CONDUCTOR.number);
+    await panel.getByRole("button", { name: "Save" }).click();
+    await expect(panel.getByText(`Song ${CONDUCTOR.number} already exists.`)).toBeVisible();
+
+    await panel.getByLabel("No.").fill("12a");
+    await panel.getByLabel("Title").fill("Renamed");
+    await panel.getByRole("button", { name: "Save" }).click();
+    await expect(panel.getByRole("button", { name: "Save" })).toBeDisabled();
     await expect.poll(async () => (await admin.collection("songs").getOne(song.id)).title).toBe("Renamed");
     expect((await admin.collection("songs").getOne(song.id)).number).toBe("12a");
 
-    await page.getByTestId("song-row-12a").click();
-    await dialog.getByRole("button", { name: "Delete song" }).click();
+    await panel.getByRole("button", { name: "Delete song" }).click();
     await page.getByRole("alertdialog").getByRole("button", { name: "Delete song" }).click();
-    await expect(page.getByTestId("song-row-12a")).toHaveCount(0);
+    await expect(page).toHaveURL(new RegExp(`/song/${other.id}/edit$`));
     expect(await admin.collection("songs").getFullList()).toHaveLength(1);
   });
 
-  test("a new song created from the player opens right away", async ({ page, admin, factory, loginAs }) => {
+  test("a new song is added from the show page", async ({ page, admin, factory, loginAs }) => {
     const owner = await factory.createUser();
     const show = await factory.createShow(owner);
-    const song = await factory.createSong(owner, show, await buildSongBundle(MINIMAL, { mode: "none", withPdf: false }));
+    await factory.createSong(owner, show, await buildSongBundle(MINIMAL, { mode: "none", withPdf: false }));
     await loginAs(owner);
-    await page.goto(`/show/${show.id}/song/${song.id}`);
+    await page.goto(`/show/${show.id}/edit`);
 
-    await page.getByRole("combobox", { name: "Song" }).click();
-    await page.getByRole("button", { name: "Add song" }).click();
+    await page.getByRole("button", { name: "New song..." }).click();
     const dialog = page.getByRole("dialog", { name: "New song" });
     await dialog.getByLabel("Title").fill("Encore");
     await dialog.getByRole("button", { name: "Create song" }).click();
 
     await expect.poll(async () => (await admin.collection("songs").getFullList()).length).toBe(2);
-    const created = (await admin.collection("songs").getFullList()).find(s => s.title === "Encore")!;
-    await expect(page).toHaveURL(new RegExp(`/song/${created.id}$`));
+    await expect(page.getByRole("link", { name: "Encore" })).toBeVisible();
   });
 
   test("deleting a show removes it with all its songs", async ({ page, admin, factory, loginAs }) => {
@@ -241,6 +242,88 @@ test.describe("show management", () => {
   });
 });
 
+test.describe("navigation", () => {
+  test("a song row opens the player and the breadcrumb leads back to the show page", async ({ page, factory, loginAs }) => {
+    const owner = await factory.createUser();
+    const show = await factory.createShow(owner, { title: "Spring Concert" });
+    const song = await factory.createSong(owner, show, await buildSongBundle(MINIMAL, { mode: "none", withPdf: false }));
+    await loginAs(owner);
+    await page.goto(`/show/${show.id}/edit`);
+
+    await page.getByTestId(`song-row-${song.number}`).click();
+    await expect(page).toHaveURL(new RegExp(`/show/${show.id}/song/${song.id}$`));
+
+    await page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: "Spring Concert" }).click();
+    await expect(page).toHaveURL(new RegExp(`/show/${show.id}/edit$`));
+  });
+
+  test("a setup hint opens the song editor", async ({ page, factory, loginAs }) => {
+    const owner = await factory.createUser();
+    const show = await factory.createShow(owner);
+    const bundle = await buildSongBundle(MINIMAL, { mode: "audio" });
+    bundle.fields.measures = bundle.fields.measures.map(({ value, beats }) => ({ value, beats }));
+    const song = await factory.createSong(owner, show, bundle);
+    await loginAs(owner);
+    await page.goto(`/show/${show.id}/edit`);
+
+    await page.getByTestId(`song-row-${song.number}`).getByRole("button", { name: /Place measures/ }).click();
+    await expect(page).toHaveURL(new RegExp(`/show/${show.id}/song/${song.id}/edit$`));
+  });
+
+  test("Edit switches between player and editor within one history entry", async ({ page, factory, loginAs }) => {
+    const owner = await factory.createUser();
+    const show = await factory.createShow(owner);
+    const song = await factory.createSong(owner, show, await buildSongBundle(MINIMAL, { mode: "none", withPdf: false }));
+    const second = await factory.createSong(owner, show, await buildSongBundle(CONDUCTOR, { mode: "none", withPdf: false }));
+    await loginAs(owner);
+    await page.goto(`/show/${show.id}/edit`);
+
+    await page.getByTestId(`song-row-${song.number}`).click();
+    const edit = page.getByRole("button", { name: "Edit", exact: true });
+    await edit.click();
+    await expect(page).toHaveURL(new RegExp(`/song/${song.id}/edit$`));
+    await page.reload();
+    await expect(edit).toHaveAttribute("aria-pressed", "true");
+
+    await page.getByRole("button", { name: `#${song.number} ${song.title}` }).click();
+    await page.getByRole("menuitem", { name: `#${second.number} ${second.title}` }).click();
+    await expect(page).toHaveURL(new RegExp(`/song/${second.id}/edit$`));
+
+    await edit.click();
+    await expect(page).toHaveURL(new RegExp(`/song/${second.id}$`));
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`/show/${show.id}/edit$`));
+  });
+
+  test("viewers get no edit controls and the show leads them to its first song", async ({ page, factory, loginAs }) => {
+    const owner = await factory.createUser();
+    const viewer = await factory.createUser();
+    const show = await factory.createShow(owner, { title: "Spring Concert", viewers: [viewer] });
+    const song = await factory.createSong(owner, show, await buildSongBundle(MINIMAL, { mode: "none", withPdf: false }));
+
+    await loginAs(viewer);
+    await page.goto(`/show/${show.id}/song/${song.id}`);
+    await expect(page.getByRole("button", { name: "Edit", exact: true })).toHaveCount(0);
+
+    const breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
+    await expect(breadcrumb.getByRole("link", { name: "Spring Concert" })).toHaveAttribute("href", `/show/${show.id}`);
+    await breadcrumb.getByRole("link", { name: "Home" }).click();
+    await expect(page).toHaveURL(/\/$/);
+  });
+
+  test("viewers who open the song editor get the player", async ({ page, factory, loginAs }) => {
+    const owner = await factory.createUser();
+    const viewer = await factory.createUser();
+    const show = await factory.createShow(owner, { viewers: [viewer] });
+    const song = await factory.createSong(owner, show, await buildSongBundle(MINIMAL, { mode: "none", withPdf: false }));
+    await loginAs(viewer);
+    await page.goto(`/show/${show.id}/song/${song.id}/edit`);
+
+    await expect(page).toHaveURL(new RegExp(`/show/${show.id}/song/${song.id}$`));
+    await expect(page.getByRole("tab", { name: "Details" })).toHaveCount(0);
+  });
+});
+
 test.describe("not found page", () => {
   test("unknown addresses show a 404 page", async ({ page }) => {
     await page.goto("/this/does/not/exist");
@@ -256,7 +339,7 @@ test.describe("not found page", () => {
     await page.goto(`/show/${show.id}`);
 
     await expect(page.getByRole("heading", { name: "Show not found" })).toBeVisible();
-    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.getByRole("main").getByRole("button", { name: "Sign in" }).click();
     await expect(page).toHaveURL(new RegExp(`/login\\?redirect=.*${show.id}`));
   });
 });
