@@ -8,7 +8,7 @@ import type { MenuItem } from "primevue/menuitem";
 import Panel from "primevue/panel";
 import ProgressSpinner from "primevue/progressspinner";
 import { useConfirm } from "primevue/useconfirm";
-import { computed, type Ref, ref, useTemplateRef, watch } from "vue";
+import { computed, ref, useTemplateRef, watch } from "vue";
 import { type RouteLocationRaw, useRouter } from "vue-router";
 
 import HeaderBar from "@/components/header/HeaderBar.vue";
@@ -20,12 +20,12 @@ import SongImportDialog from "@/components/song/SongImportDialog.vue";
 import SongSetupStatus from "@/components/song/SongSetupStatus.vue";
 import { useNotify } from "@/composables/useNotify";
 import { RECORDING_FILE_ACCEPT } from "@/core/import/songImport";
-import Show from "@/core/models/show";
 import type Song from "@/core/models/song";
 import { getSongSetup, isFileStep } from "@/core/models/songSetup";
 import { displayFilename } from "@/core/utils/file";
 import { useAuthStore } from "@/stores/auth";
 import { useSettingsStore } from "@/stores/settings";
+import { useShowStore } from "@/stores/show";
 
 const props = defineProps<{
   showId: string;
@@ -33,6 +33,7 @@ const props = defineProps<{
 
 const auth = useAuthStore();
 const settings = useSettingsStore();
+const showStore = useShowStore();
 const router = useRouter();
 const confirm = useConfirm();
 const { notifyError } = useNotify();
@@ -43,9 +44,13 @@ const VISIBILITY_SUMMARY = {
   public: { icon: "pi-globe", label: "Public" },
 };
 
-const show = ref() as Ref<Show | undefined>;
+// Viewers are sent to the player, so they must not see this page while that redirect runs.
+const show = computed(() => {
+  const current = showStore.current;
+  return current?.id === props.showId && current.getAccess(auth.user?.id).editor ? current : undefined;
+});
 const loading = ref(true);
-const title = ref("");
+const title = ref(show.value?.title ?? "");
 const shareVisible = ref(false);
 const deleteVisible = ref(false);
 const importFiles = ref<File[]>([]);
@@ -75,13 +80,12 @@ const accessSummary = computed(() => {
 async function loadShow(): Promise<void> {
   loading.value = true;
   try {
-    const loaded = await Show.get(props.showId);
+    const loaded = await showStore.load(props.showId);
     if (!loaded.getAccess(auth.user?.id).editor) {
       router.replace({ name: "show", params: { showId: props.showId } });
       return;
     }
 
-    show.value = loaded;
     title.value = loaded.title;
   } catch {
     router.replace({ name: "not-found", params: { pathMatch: ["show", props.showId, "edit"] } });
@@ -210,6 +214,7 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
         header="Show"
         pt:root="flex flex-col lg:overflow-y-auto"
         pt:content-container="flex-1"
+        pt:content-wrapper="min-w-0"
         pt:content="flex flex-col gap-5 h-full"
       >
         <div class="flex gap-4 lg:flex-col">
@@ -239,7 +244,10 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
           <span class="text-sm font-medium text-muted-color">Access</span>
           <div class="flex items-center gap-3 rounded-md border border-(--p-content-border-color) p-3">
             <span class="flex size-9 flex-none items-center justify-center rounded-full bg-surface-100 dark:bg-surface-800">
-              <i :class="`pi ${accessSummary!.icon}`" />
+              <i
+                :class="`pi ${accessSummary!.icon}`"
+                aria-hidden="true"
+              />
             </span>
             <div class="min-w-0 flex-1">
               <div class="font-medium">
@@ -251,7 +259,7 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
             </div>
           </div>
           <Button
-            label="Share..."
+            label="Share"
             icon="pi pi-user-plus"
             severity="secondary"
             fluid
@@ -265,7 +273,7 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
         >
           <Divider />
           <Button
-            label="Delete show..."
+            label="Delete show"
             icon="pi pi-trash"
             severity="danger"
             size="small"
@@ -280,6 +288,7 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
         pt:root="flex flex-col lg:min-h-0"
         pt:header="flex-none"
         pt:content-container="flex-1 lg:min-h-0 lg:overflow-y-auto"
+        pt:content-wrapper="min-w-0"
         pt:content="h-full"
       >
         <template #header>
@@ -293,8 +302,8 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
               class="flex gap-2"
             >
               <Button
-                label="Import files..."
-                aria-label="Import files..."
+                label="Import files"
+                aria-label="Import files"
                 icon="pi pi-upload"
                 severity="secondary"
                 size="small"
@@ -302,8 +311,8 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
                 @click="fileDialog.open()"
               />
               <Button
-                label="New song..."
-                aria-label="New song..."
+                label="New song"
+                aria-label="New song"
                 icon="pi pi-plus"
                 severity="secondary"
                 size="small"
@@ -320,7 +329,10 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
           class="flex h-full items-center justify-center p-4"
         >
           <div class="flex w-full max-w-2xl flex-col items-center gap-4 rounded-lg border-2 border-dashed border-surface-300 px-4 py-12 text-center sm:px-8 dark:border-surface-700">
-            <i class="pi pi-cloud-upload text-6xl text-primary" />
+            <i
+              class="pi pi-cloud-upload text-6xl text-primary"
+              aria-hidden="true"
+            />
             <div class="text-xl font-semibold">
               Add the songs of this show
             </div>
@@ -331,16 +343,19 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
               <span>03 Swing Low.pdf</span>
               <span>03 Swing Low - Soprano.mp3</span>
               <span>03 Swing Low - Alto.mp3</span>
-              <span class="mt-1 font-sans text-color"><i class="pi pi-arrow-right mr-2 text-xs" />Song 3 "Swing Low" with its score and 2 recordings</span>
+              <span class="mt-1 font-sans text-color"><i
+                class="pi pi-arrow-right mr-2 text-xs"
+                aria-hidden="true"
+              />Song 3 "Swing Low" with its score and 2 recordings</span>
             </div>
             <div class="flex flex-wrap justify-center gap-2">
               <Button
-                label="Choose files..."
+                label="Choose files"
                 icon="pi pi-folder-open"
                 @click="fileDialog.open()"
               />
               <Button
-                label="Add song manually..."
+                label="Add song manually"
                 severity="secondary"
                 text
                 @click="newSongVisible = true"
@@ -388,17 +403,17 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
                 <th class="w-14 py-2 pl-2 font-medium">
                   No.
                 </th>
-                <th class="py-2 font-medium">
+                <th class="py-2 pr-4 font-medium">
                   Title
                 </th>
-                <th class="py-2 font-medium">
+                <th class="py-2 pr-4 font-medium">
                   Score
                 </th>
-                <th class="py-2 font-medium">
+                <th class="py-2 pr-4 font-medium">
                   Playback
                 </th>
-                <th class="py-2 font-medium">
-                  Setup
+                <th class="py-2 pr-4 font-medium">
+                  Status
                 </th>
                 <th class="w-24" />
               </tr>
@@ -408,13 +423,12 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
                 v-for="song in songs"
                 :key="song.id"
                 class="group cursor-pointer border-t border-(--p-content-border-color) transition-colors hover:bg-surface-50 dark:hover:bg-surface-800/60"
-                :data-testid="`song-row-${song.number}`"
                 @click="router.push(songRoute(song, 'song'))"
               >
                 <td class="py-3 pl-2 font-mono text-muted-color">
                   {{ song.number }}
                 </td>
-                <td class="py-3 font-medium">
+                <td class="py-3 pr-4 font-medium">
                   <RouterLink
                     :to="songRoute(song, 'song')"
                     class="focus-visible:underline focus-visible:outline-none"
@@ -423,28 +437,34 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
                     {{ song.title }}
                   </RouterLink>
                 </td>
-                <td class="max-w-48 py-3 text-sm">
+                <td class="max-w-48 py-3 pr-4 text-sm">
                   <span
                     v-if="song.pdfFile"
                     class="flex items-center gap-2"
                     :title="displayFilename(song.pdfFile)"
-                  ><i class="pi pi-file-pdf text-muted-color" /><span class="truncate">{{ displayFilename(song.pdfFile) }}</span></span>
+                  ><i
+                    class="pi pi-file-pdf text-muted-color"
+                    aria-hidden="true"
+                  /><span class="truncate">{{ displayFilename(song.pdfFile) }}</span></span>
                   <span
                     v-else
                     class="text-muted-color italic"
                   >None</span>
                 </td>
-                <td class="py-3 text-sm whitespace-nowrap">
+                <td class="py-3 pr-4 text-sm whitespace-nowrap">
                   <span
                     v-if="playbackSummary(song)"
                     class="flex items-center gap-2"
-                  ><i :class="`pi ${playbackSummary(song)!.icon} text-muted-color`" />{{ playbackSummary(song)!.label }}</span>
+                  ><i
+                    :class="`pi ${playbackSummary(song)!.icon} text-muted-color`"
+                    aria-hidden="true"
+                  />{{ playbackSummary(song)!.label }}</span>
                   <span
                     v-else
                     class="text-muted-color italic"
                   >None</span>
                 </td>
-                <td class="py-3">
+                <td class="py-3 pr-4">
                   <SongSetupStatus
                     :song="song"
                     @continue="continueSetup(song)"
@@ -467,7 +487,10 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
             </tbody>
           </table>
           <div class="mt-4 hidden rounded-md border border-dashed border-surface-300 p-3 text-center text-sm text-muted-color md:block dark:border-surface-700">
-            <i class="pi pi-upload mr-2" />Drop files anywhere to add songs or update existing ones
+            <i
+              class="pi pi-upload mr-2"
+              aria-hidden="true"
+            />Drop files anywhere to add songs or update existing ones
           </div>
         </template>
       </Panel>
@@ -479,7 +502,10 @@ function playbackSummary(song: Song): { icon: string; label: string } | undefine
       class="pointer-events-none absolute inset-2 z-20 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/10 backdrop-blur-sm"
     >
       <div class="flex flex-col items-center gap-2 text-primary">
-        <i class="pi pi-cloud-upload text-6xl" />
+        <i
+          class="pi pi-cloud-upload text-6xl"
+          aria-hidden="true"
+        />
         <span class="text-xl font-semibold">Drop to import into "{{ show.title }}"</span>
       </div>
     </div>

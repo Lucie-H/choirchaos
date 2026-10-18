@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { storeToRefs } from "pinia";
 import Button from "primevue/button";
 import ButtonGroup from "primevue/buttongroup";
-import { computed, onMounted, ref, watch } from "vue";
+import Message from "primevue/message";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import KbdShortcut from "@/components/base/KbdShortcut.vue";
@@ -15,17 +17,18 @@ import VampCard from "@/components/player/VampCard.vue";
 import ScoreViewer from "@/components/score/ScoreViewer.vue";
 import { type ShortcutAction, useGlobalShortcuts } from "@/composables/useGlobalShortcuts";
 import { provideMeasureEditor, useMeasureEditor } from "@/composables/useMeasureEditor";
-import Show from "@/core/models/show";
 import type Song from "@/core/models/song";
+import { hasUnsyncedAudio } from "@/core/models/songSetup";
 import { getAccessFlags } from "@/pocketbase/auth";
-import { consumePendingShow } from "@/router/router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
 import { useSettingsStore } from "@/stores/settings";
+import { useShowStore } from "@/stores/show";
 
 const auth = useAuthStore();
 const settings = useSettingsStore();
 const player = usePlayerStore();
+const showStore = useShowStore();
 const route = useRoute();
 const router = useRouter();
 
@@ -34,8 +37,7 @@ const props = defineProps<{
   songId?: string;
 }>();
 
-// store show and current song data from pocketbase
-const show = ref<Show | undefined>();
+const { current: show } = storeToRefs(showStore);
 const showLoading = ref(true);
 
 const song = ref<Song | undefined>();
@@ -46,6 +48,8 @@ const showWarpPanel = computed(() => editMode.value && song.value?.playerMode ==
 const hasMarkers = computed(() => (song.value?.events.markers.items().length ?? 0) > 0);
 const hasStartPanel = computed(() => editMode.value || hasMarkers.value);
 const isStartPanelOpen = computed(() => hasStartPanel.value && settings.current.workspace.panelVisible.markers);
+const isWarpPanelOpen = computed(() => showWarpPanel.value && settings.current.workspace.panelVisible.warp);
+const showSyncNotice = computed(() => !!song.value && hasUnsyncedAudio(song.value) && !isWarpPanelOpen.value);
 
 provideMeasureEditor(useMeasureEditor(song, editMode));
 
@@ -237,6 +241,9 @@ watch(() => settings.current.playback.vampsEnabled, value => player.setVampsEnab
 
 // DATA LOADING PROCEDURE
 
+// The player is global, so it would keep playing on pages without a transport.
+onUnmounted(() => player.unload());
+
 function selectSong(songId?: string, autoplay: boolean = false): void {
   // route to the correct song
   if (songId && songId !== props.songId) {
@@ -259,12 +266,7 @@ watch(() => props.songId, async (songId) => {
     showLoading.value = true;
     songLoading.value = true;
 
-    // Load show if not already done so
-    if (!show.value) {
-      const pending = consumePendingShow();
-      show.value = pending ?? await Show.get(props.showId);
-    }
-
+    const loadedShow = await showStore.load(props.showId);
     showLoading.value = false;
 
     // If no song id was selected, clear the current song
@@ -274,10 +276,10 @@ watch(() => props.songId, async (songId) => {
     }
 
     // Select the song
-    song.value = show.value.songs.find(s => s.id === songId);
+    song.value = loadedShow.songs.find(s => s.id === songId);
     if (!song.value) {
       console.error("Invalid song id:", songId);
-      const firstSong = show.value.songs[0];
+      const firstSong = loadedShow.songs[0];
       if (firstSong) {
         selectSong(firstSong.id);
       }
@@ -337,6 +339,7 @@ const pdfLoading = ref(false);
         :key="tab.value"
         :label="tab.label"
         :severity="selectedTab === tab.value ? 'primary' : 'secondary'"
+        :aria-pressed="selectedTab === tab.value"
         fluid
         @click="settings.update({ workspace: { selectedTab: tab.value } })"
       />
@@ -375,7 +378,8 @@ const pdfLoading = ref(false);
           v-if="hasStartPanel"
           class="absolute top-2 left-full z-10 hidden transition-all lg:block"
           :class="isStartPanelOpen ? 'rounded-l-none' : ''"
-          :aria-label="editMode ? 'Show Editor Panel' : 'Show Markers Panel'"
+          :aria-label="editMode ? 'Editor panel' : 'Markers panel'"
+          :aria-expanded="isStartPanelOpen"
           :icon="`pi ${isStartPanelOpen ? 'pi-chevron-left' : 'pi-chevron-right'}`"
           severity="secondary"
           rounded
@@ -395,6 +399,20 @@ const pdfLoading = ref(false);
             :edit-mode="editMode"
             @pdf-loading="pdfLoading = $event"
           />
+        </div>
+        <!-- The dark theme's message background is translucent and would wash out over the white score. -->
+        <div
+          v-if="showSyncNotice"
+          class="absolute left-1/2 w-max max-w-[calc(100%-2rem)] -translate-x-1/2 rounded-md bg-surface-0 dark:bg-surface-900"
+          :class="editMode ? 'top-14' : 'top-2'"
+        >
+          <Message
+            severity="warn"
+            size="small"
+            icon="pi pi-exclamation-circle"
+          >
+            Audio not synced yet, measures may not match the recording
+          </Message>
         </div>
         <div class="absolute bottom-4 left-1/2 w-[calc(100%-2rem)] -translate-x-1/2 md:w-72 lg:bottom-16">
           <VampCard
@@ -418,13 +436,17 @@ const pdfLoading = ref(false);
           v-if="show && !showLoading && songs.length === 0"
           class="absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center"
         >
-          <i class="pi pi-book text-5xl text-muted-color" />
+          <i
+            class="pi pi-book text-5xl text-muted-color"
+            aria-hidden="true"
+          />
           <span class="text-xl font-semibold">No songs yet</span>
           <span class="text-muted-color">Songs appear here as soon as they are added to "{{ show.title }}".</span>
         </div>
         <div
           v-if="player.loading || pdfLoading"
           class="absolute top-0 left-0 flex size-full flex-col items-center justify-center bg-black/50 text-white select-none"
+          role="status"
         >
           <BabySvenja class="w-full max-w-lg" />
           <p class="text-xl">
@@ -453,7 +475,8 @@ const pdfLoading = ref(false);
         <Button
           class="absolute top-2 right-full z-10 hidden transition-all lg:block"
           :class="settings.current.workspace.panelVisible.mixer ? 'rounded-r-none' : ''"
-          aria-label="Show Mixer Panel"
+          aria-label="Mixer panel"
+          :aria-expanded="settings.current.workspace.panelVisible.mixer"
           :icon="`pi ${settings.current.workspace.panelVisible.mixer ? 'pi-chevron-right' : 'pi-chevron-left'}`"
           severity="secondary"
           rounded

@@ -118,8 +118,8 @@ test.describe("show management", () => {
     expect(midiSong.tracks.map((t: { title: string }) => t.title)).toEqual(CONDUCTOR.parts.map(part => part.name));
     expect(midiSong.measures.length).toBeGreaterThan(0);
 
-    await expect(page.getByTestId("song-row-1")).toContainText("2 recordings");
-    await expect(page.getByTestId("song-row-2")).toContainText("MIDI");
+    await expect(page.getByRole("row", { name: "Minimal" })).toContainText("2 recordings");
+    await expect(page.getByRole("row", { name: "Conductor" })).toContainText("MIDI");
     expect(errors).toEqual([]);
   });
 
@@ -152,7 +152,7 @@ test.describe("show management", () => {
     await page.goto(`/show/${show.id}/edit`);
 
     await page.getByRole("button", { name: `Options for ${song.title}` }).click();
-    await expect(page.getByRole("menuitem", { name: "Details..." })).toHaveCount(0);
+    await expect(page.getByRole("menuitem", { name: "Details", exact: true })).toHaveCount(0);
     await page.getByRole("menuitem", { name: "Edit" }).click();
     await page.getByRole("tab", { name: "Details" }).click();
     const panel = page.getByRole("tabpanel", { name: "Details" });
@@ -181,7 +181,7 @@ test.describe("show management", () => {
     await loginAs(owner);
     await page.goto(`/show/${show.id}/edit`);
 
-    await page.getByRole("button", { name: "New song..." }).click();
+    await page.getByRole("button", { name: "New song" }).click();
     const dialog = page.getByRole("dialog", { name: "New song" });
     await dialog.getByLabel("Title").fill("Encore");
     await dialog.getByRole("button", { name: "Create song" }).click();
@@ -250,7 +250,7 @@ test.describe("navigation", () => {
     await loginAs(owner);
     await page.goto(`/show/${show.id}/edit`);
 
-    await page.getByTestId(`song-row-${song.number}`).click();
+    await page.getByRole("row", { name: song.title }).click();
     await expect(page).toHaveURL(new RegExp(`/show/${show.id}/song/${song.id}$`));
 
     await page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: "Spring Concert" }).click();
@@ -266,7 +266,7 @@ test.describe("navigation", () => {
     await loginAs(owner);
     await page.goto(`/show/${show.id}/edit`);
 
-    await page.getByTestId(`song-row-${song.number}`).getByRole("button", { name: /Place measures/ }).click();
+    await page.getByRole("row", { name: song.title }).getByRole("button", { name: /Place measures/ }).click();
     await expect(page).toHaveURL(new RegExp(`/show/${show.id}/song/${song.id}/edit$`));
   });
 
@@ -278,7 +278,7 @@ test.describe("navigation", () => {
     await loginAs(owner);
     await page.goto(`/show/${show.id}/edit`);
 
-    await page.getByTestId(`song-row-${song.number}`).click();
+    await page.getByRole("row", { name: song.title }).click();
     const edit = page.getByRole("button", { name: "Edit", exact: true });
     await edit.click();
     await expect(page).toHaveURL(new RegExp(`/song/${song.id}/edit$`));

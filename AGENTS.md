@@ -75,10 +75,10 @@ Rehearsers (viewers) only play songs back. Editors (editors and owners) also set
 ### Design Principles
 
 1. **Rehearsers never see editing.** No edit control, hint or empty state that asks for editing is shown to someone who cannot edit.
-2. **Each element type has one kind of job.** Links, list rows and breadcrumb items navigate. Pickers choose what the current page shows and keep the page. Buttons run an action or open a dialog or popover, and end their label with "..." when they open a dialog. Segmented controls and toggle buttons switch a tool, option or mode and look pressed while active. Never make a navigation look like a mode switch or the other way round.
+2. **Each element type has one kind of job.** Links, list rows and breadcrumb items navigate. Pickers choose what the current page shows and keep the page. Buttons run an action or open a dialog or popover. Their labels never end with "...", which only adds noise next to other buttons. Segmented controls and toggle buttons switch a tool, option or mode and look pressed while active. Never make a navigation look like a mode switch or the other way round.
 3. **One meaning per icon, app-wide** (see the table below). Icon-only buttons are reserved for universally known controls (transport, close, overflow). Everything else carries a text label where the layout has room, and always an `aria-label`.
 4. **State that matters lives in the URL.** Reloading or going back keeps the user where they were. Editing a song is a route, not a flag.
-5. **Every action has one home.** Secondary entry points open the same dialog or page and keep its label. Only empty states and status hints may name the step instead, e.g. "Add playback...".
+5. **Every action has one home.** Secondary entry points open the same dialog or page and keep its label. Only empty states and status hints may name the step instead, e.g. "Add playback".
 6. **Do not duplicate information.** A canvas (the score, the waveform) is the list of its objects. Side panels show the selection's properties or what the canvas cannot show.
 7. **Select, then act.** The panel next to a canvas edits the whole selection at once and shows mixed values as empty.
 8. **Automation proposes, the user decides, leftovers stay visible.** Automatic results are previewed where they will appear, and anything still to check stays marked on the object until resolved.
@@ -99,6 +99,7 @@ Rehearsers (viewers) only play songs back. Editors (editors and owners) also set
 | `pi-sparkles` | Automatic measure detection |
 | `pi-trash` | Delete or remove |
 | `pi-arrow-up-left` | The score's Select tool |
+| `pi-arrows-alt` | The score's Move tool |
 | `pi-stop` | The score's Draw tool |
 
 ### Conventions
@@ -110,6 +111,19 @@ Rehearsers (viewers) only play songs back. Editors (editors and owners) also set
 - Canvas components cannot use CSS variables. Resolve theme colors at runtime and rebuild when the `.dark` class changes (see `WaveformView`).
 - Dark mode is class-based (`.dark`). Check every visual change in both modes.
 - A MIDI track's title links it to its MIDI data by name, so MIDI tracks cannot be renamed.
+
+### Accessibility
+
+Every change keeps the app usable with a screen reader and keyboard. Prefer native elements and PrimeVue components over ARIA, since no ARIA is better than wrong ARIA.
+
+- Every control has an accessible name: its visible text, a `<label for>`/`input-id`, `aria-labelledby` pointing at a visible heading, or `aria-label` when nothing visible fits. Names say what the control acts on when the same control repeats ("Remove Solo", not "Remove") and contain the visible text.
+- Decorative icons and graphics get `aria-hidden="true"` (`<i class="pi ...">`, SVGs in `icons/`, canvases). PrimeVue's own icon props are hidden globally in `main.ts`. An icon that is the only carrier of a meaning gets `role="img"` and an `aria-label` instead.
+- Never put `aria-label` on a plain `div` or `span`. Give it a role first, or label something else.
+- Pass PrimeVue labels as `aria-label`/`aria-labelledby` on the component. `Select`, `InputNumber`, `Slider`, `ToggleSwitch` and `SelectButton` forward them to the focusable element.
+- Expose state: `aria-pressed` on toggle buttons, `aria-expanded` on disclosures, `aria-current="page"` on the current breadcrumb, `aria-live` or `role="status"` on text that changes without focus moving.
+- Group repeated items as lists or tables, and name regions and lists (`aria-labelledby` on a visible title), so tests and screen readers can scope to them.
+- Use Tailwind's `sr-only` for text only screen readers need, e.g. labels hidden on narrow layouts.
+- Tests find elements the way users do (`getByRole` with a name). An element a test cannot reach that way lacks a name, so fix the app, not the test.
 
 ---
 
