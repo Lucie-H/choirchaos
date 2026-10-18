@@ -50,10 +50,21 @@ interface HeadlessAudioContextOptions extends AudioContextOptions {
   sinkId: { type: "none" };
 }
 
+const JsdomEvent = globalThis.Event;
+
 class HeadlessAudioContext extends AudioContext {
   constructor(options: AudioContextOptions = {}) {
     const headlessOptions: HeadlessAudioContextOptions = { ...options, sinkId: { type: "none" } };
     super(headlessOptions);
+  }
+
+  // node-web-audio-api extends jsdom's EventTarget but creates its events from the Event global at
+  // dispatch time. Native statechange events can arrive after a test file ends, when vitest has
+  // already restored Node's Event, which jsdom's dispatchEvent rejects. Waiting for them in close()
+  // is no option, since the closed event is not always delivered.
+  dispatchEvent(event: Event): boolean {
+    const { type } = event;
+    return super.dispatchEvent(event instanceof JsdomEvent ? event : new JsdomEvent(type));
   }
 }
 
